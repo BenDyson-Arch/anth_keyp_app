@@ -5,8 +5,8 @@ Controls
 --------
   Left-click  : place current keypoint, auto-advances to next stage
   Right-click : remove the keypoint nearest the cursor
-  Tab         : skip current limb group (leg1 / leg2 / arm1 / arm2)
-  Space / ->  : save & advance to next figure
+  G           : skip current limb group (leg1 / leg2 / arm1 / arm2)
+  N / ->      : save & advance to next figure
   <-          : save & go to previous figure
   U           : undo last placed point (restores previous stage)
   Delete      : clear all keypoints on current figure
@@ -50,6 +50,7 @@ try:
         QListWidgetItem,
         QMainWindow,
         QPushButton,
+        QShortcut,
         QVBoxLayout,
         QWidget,
     )
@@ -109,19 +110,12 @@ STAGES = [
     ("leg1_foot", "leg1", "Leg 1 - foot"),
     ("leg2_knee", "leg2", "Leg 2 - knee"),
     ("leg2_foot", "leg2", "Leg 2 - foot"),
-    ("arm1_shoulder", "arm1", "Arm 1 - shoulder"),
+    ("arm1_elbow", "arm1", "Arm 1 - elbow"),
     ("arm1_hand", "arm1", "Arm 1 - hand"),
-    ("arm2_shoulder", "arm2", "Arm 2 - shoulder"),
+    ("arm2_elbow", "arm2", "Arm 2 - elbow"),
     ("arm2_hand", "arm2", "Arm 2 - hand"),
 ]
 
-# Groups that can be skipped -- value is the first stage index of the next group
-SKIP_MAP = {
-    "leg1": 6,  # -> leg2_knee
-    "leg2": 8,  # -> arm1_shoulder
-    "arm1": 10,  # -> arm2_shoulder
-    "arm2": 12,  # -> end (save & next figure)
-}
 
 # Skeleton connections drawn as lines between placed keypoints
 CONNECTIONS = [
@@ -132,10 +126,10 @@ CONNECTIONS = [
     ("leg1_knee", "leg1_foot"),
     ("pelvis", "leg2_knee"),
     ("leg2_knee", "leg2_foot"),
-    ("neck", "arm1_shoulder"),
-    ("arm1_shoulder", "arm1_hand"),
-    ("neck", "arm2_shoulder"),
-    ("arm2_shoulder", "arm2_hand"),
+    ("neck", "arm1_elbow"),
+    ("arm1_elbow", "arm1_hand"),
+    ("neck", "arm2_elbow"),
+    ("arm2_elbow", "arm2_hand"),
 ]
 
 KP_COLOURS = {
@@ -147,9 +141,9 @@ KP_COLOURS = {
     "leg1_foot": "#88FF88",
     "leg2_knee": "#2255FF",
     "leg2_foot": "#228833",
-    "arm1_shoulder": "#FFDD00",
+    "arm1_elbow": "#FFDD00",
     "arm1_hand": "#0088FF",
-    "arm2_shoulder": "#AAEE00",
+    "arm2_elbow": "#AAEE00",
     "arm2_hand": "#4444FF",
 }
 
@@ -212,12 +206,7 @@ def render_pixmap(
     rgb[m == 0] = (28, 28, 28)
     rgb = np.ascontiguousarray(rgb)
     qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
-    pixmap = QPixmap.fromImage(qimg).scaled(
-        w * scale,
-        h * scale,
-        Qt.KeepAspectRatio,
-        Qt.FastTransformation,
-    )
+    pixmap = QPixmap.fromImage(qimg)
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
@@ -225,10 +214,10 @@ def render_pixmap(
     def _disp(x, y):
         dx = (RASTER_SIZE - 1 - x) if flip_x else x
         dy = (RASTER_SIZE - 1 - y) if flip_y else y
-        return int(dx * scale), int(dy * scale)
+        return int(dx), int(dy)
 
     # --- skeleton lines (draw first, under dots) ---
-    painter.setPen(QPen(QColor("#888888"), 2, Qt.SolidLine))
+    painter.setPen(QPen(QColor("#888888"), 1, Qt.SolidLine))
     for a, b in CONNECTIONS:
         if a in kp_dict and b in kp_dict:
             ax, ay = _disp(*kp_dict[a])
@@ -236,8 +225,8 @@ def render_pixmap(
             painter.drawLine(ax, ay, bx, by)
 
     # --- keypoint dots ---
-    r = DOT_RADIUS
-    font = QFont("Arial", 7)
+    r = max(2, DOT_RADIUS // max(1, scale))
+    font = QFont("Arial", max(6, 7 // max(1, scale)))
     painter.setFont(font)
     for name, (x, y) in kp_dict.items():
         px, py = _disp(x, y)
@@ -256,9 +245,9 @@ def render_pixmap(
             c.setAlpha(160)
             pen = QPen(c, 1, Qt.DashLine)
             painter.setPen(pen)
-            mid = (RASTER_SIZE // 2) * scale
-            painter.drawLine(mid, 0, mid, h * scale)
-            painter.drawLine(0, mid, w * scale, mid)
+            mid = RASTER_SIZE // 2
+            painter.drawLine(mid, 0, mid, h)
+            painter.drawLine(0, mid, w, mid)
 
     painter.end()
     return pixmap
@@ -272,14 +261,54 @@ def render_pixmap(
 class ImageCanvas(QLabel):
     def __init__(self, left_cb, right_cb, parent=None):
         super().__init__(parent)
-        self.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.setFixedSize(RASTER_SIZE * DISPLAY_SCALE, RASTER_SIZE * DISPLAY_SCALE)
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(320, 320)
+        self.setScaledContents(False)
         self._left_cb = left_cb
         self._right_cb = right_cb
+        self._base_pixmap = None
+        self._display_scale = 1.0
+        self._x_offset = 0
+        self._y_offset = 0
+
+    def set_image(self, pixmap):
+        self._base_pixmap = pixmap
+        self._update_scaled_pixmap()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_scaled_pixmap()
+
+    def _update_scaled_pixmap(self):
+        if self._base_pixmap is None:
+            self.clear()
+            return
+
+        scaled = self._base_pixmap.scaled(
+            self.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self._display_scale = scaled.width() / max(1, self._base_pixmap.width())
+        self._x_offset = max(0, (self.width() - scaled.width()) // 2)
+        self._y_offset = max(0, (self.height() - scaled.height()) // 2)
+        self.setPixmap(scaled)
 
     def mousePressEvent(self, event):
-        x = max(0, min(RASTER_SIZE - 1, event.x() // DISPLAY_SCALE))
-        y = max(0, min(RASTER_SIZE - 1, event.y() // DISPLAY_SCALE))
+        if self._base_pixmap is None:
+            return
+
+        px = event.x() - self._x_offset
+        py = event.y() - self._y_offset
+        scaled_w = self._base_pixmap.width() * self._display_scale
+        scaled_h = self._base_pixmap.height() * self._display_scale
+        if px < 0 or py < 0 or px >= scaled_w or py >= scaled_h:
+            return
+
+        x = int(px / self._display_scale)
+        y = int(py / self._display_scale)
+        x = max(0, min(RASTER_SIZE - 1, x))
+        y = max(0, min(RASTER_SIZE - 1, y))
         if event.button() == Qt.LeftButton:
             self._left_cb(x, y)
         elif event.button() == Qt.RightButton:
@@ -308,7 +337,9 @@ class LabelerWindow(QMainWindow):
                 self.labels = json.load(f)
             print(f"Loaded {len(self.labels)} existing labels from {SAVE_PATH}")
 
+        self._skip_previously_annotated_on_load()
         self._build_ui()
+        self._bind_shortcuts()
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -317,10 +348,8 @@ class LabelerWindow(QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle("Anthropomorph Keypoint Labeler")
-        self.setMinimumSize(
-            max(960, RASTER_SIZE * DISPLAY_SCALE + 320),
-            max(780, RASTER_SIZE * DISPLAY_SCALE + 80),
-        )
+        self.resize(1280, 960)
+        self.setMinimumSize(1080, 760)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -330,15 +359,17 @@ class LabelerWindow(QMainWindow):
 
         # Left: canvas + controls
         left = QVBoxLayout()
+        left.setSpacing(8)
         self.canvas = ImageCanvas(self._on_left_click, self._on_right_click)
-        left.addWidget(self.canvas)
+        left.addWidget(self.canvas, stretch=1)
 
         nav = QHBoxLayout()
         self.btn_prev = QPushButton("< Prev  [<-]")
-        self.btn_next = QPushButton("Next >  [Space]")
+        self.btn_next = QPushButton("Next >  [N]")
         self.btn_skip_fig = QPushButton("Skip fig (no save)")
         self.btn_clear = QPushButton("Clear All  [Del]")
         for b in (self.btn_prev, self.btn_next, self.btn_skip_fig, self.btn_clear):
+            b.setMinimumHeight(44)
             nav.addWidget(b)
         left.addLayout(nav)
 
@@ -349,6 +380,8 @@ class LabelerWindow(QMainWindow):
         self.btn_flip_y.setCheckable(True)
         self.btn_flip_x.setStyleSheet("QPushButton:checked { background: #885500; }")
         self.btn_flip_y.setStyleSheet("QPushButton:checked { background: #885500; }")
+        self.btn_flip_x.setMinimumHeight(40)
+        self.btn_flip_y.setMinimumHeight(40)
         flip_row.addWidget(self.btn_flip_x)
         flip_row.addWidget(self.btn_flip_y)
         left.addLayout(flip_row)
@@ -357,7 +390,7 @@ class LabelerWindow(QMainWindow):
         self.info_label.setAlignment(Qt.AlignCenter)
         self.info_label.setStyleSheet("font-size: 11px;")
         left.addWidget(self.info_label)
-        layout.addLayout(left)
+        layout.addLayout(left, stretch=1)
 
         # Right: stage list + actions
         right = QVBoxLayout()
@@ -376,7 +409,8 @@ class LabelerWindow(QMainWindow):
         right.addWidget(line)
 
         self.kp_list = QListWidget()
-        self.kp_list.setFixedWidth(210)
+        self.kp_list.setMinimumWidth(250)
+        self.kp_list.setMinimumHeight(360)
         mono = QFont("Monospace", 10)
         for key, group, label in STAGES:
             item = QListWidgetItem("  " + label)
@@ -390,14 +424,17 @@ class LabelerWindow(QMainWindow):
         line2.setFrameShape(QFrame.HLine)
         right.addWidget(line2)
 
-        self.btn_skip_group = QPushButton("Skip group  [Tab]")
+        self.btn_skip_group = QPushButton("Skip group  [G]")
         self.btn_skip_group.setEnabled(False)
+        self.btn_skip_group.setMinimumHeight(44)
         right.addWidget(self.btn_skip_group)
 
         self.btn_undo = QPushButton("Undo  [U]")
+        self.btn_undo.setMinimumHeight(44)
         right.addWidget(self.btn_undo)
 
         self.btn_save = QPushButton("Save  [S]")
+        self.btn_save.setMinimumHeight(44)
         right.addWidget(self.btn_save)
 
         right.addStretch()
@@ -407,6 +444,7 @@ class LabelerWindow(QMainWindow):
         right.addWidget(self.saved_label)
 
         layout.addLayout(right)
+        right.setStretchFactor(self.kp_list, 1)
 
         self.btn_prev.clicked.connect(lambda: self._navigate(-1))
         self.btn_next.clicked.connect(lambda: self._navigate(+1))
@@ -418,9 +456,36 @@ class LabelerWindow(QMainWindow):
         self.btn_flip_x.clicked.connect(self._toggle_flip_x)
         self.btn_flip_y.clicked.connect(self._toggle_flip_y)
 
+    def _bind_shortcuts(self):
+        shortcuts = [
+            (Qt.Key_Right, lambda: self._navigate(+1)),
+            (Qt.Key_N, lambda: self._navigate(+1)),
+            (Qt.Key_Left, lambda: self._navigate(-1)),
+            (Qt.Key_Delete, self._clear_current),
+            (Qt.Key_Backspace, self._clear_current),
+            (Qt.Key_U, self._undo_last),
+            (Qt.Key_S, self._save),
+            (Qt.Key_G, self._skip_group),
+            (Qt.Key_X, self._shortcut_flip_x),
+            (Qt.Key_Y, self._shortcut_flip_y),
+        ]
+        self._shortcuts = []
+        for key, handler in shortcuts:
+            shortcut = QShortcut(key, self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(handler)
+            self._shortcuts.append(shortcut)
+
     # ------------------------------------------------------------------
     # State helpers
     # ------------------------------------------------------------------
+
+    def _skip_previously_annotated_on_load(self):
+        for i, fig in enumerate(self.figures):
+            if fig["shape_id"] not in self.labels:
+                self.idx = i
+                return
+        self.idx = 0
 
     def _shape_id(self):
         return self.figures[self.idx]["shape_id"]
@@ -431,9 +496,6 @@ class LabelerWindow(QMainWindow):
     def _stage_key(self):
         return STAGES[self.stage][0] if self.stage < len(STAGES) else None
 
-    def _stage_group(self):
-        return STAGES[self.stage][1] if self.stage < len(STAGES) else None
-
     # ------------------------------------------------------------------
     # Refresh display
     # ------------------------------------------------------------------
@@ -441,7 +503,7 @@ class LabelerWindow(QMainWindow):
     def _refresh(self):
         mask = self.masks[self.idx]
         kp = self._kp()
-        self.canvas.setPixmap(
+        self.canvas.set_image(
             render_pixmap(
                 mask, kp, stage=self.stage, flip_x=self.flip_x, flip_y=self.flip_y
             )
@@ -458,7 +520,6 @@ class LabelerWindow(QMainWindow):
 
     def _refresh_list(self):
         kp = self._kp()
-        group = self._stage_group()
         for i, (key, grp, label) in enumerate(STAGES):
             item = self.kp_list.item(i)
             tick = "v " if key in kp else "  "
@@ -470,17 +531,21 @@ class LabelerWindow(QMainWindow):
         self.kp_list.setCurrentRow(min(self.stage, len(STAGES) - 1))
         self.kp_list.blockSignals(False)
         # Skip button label
-        group_names = {
-            "leg1": "Leg 1",
-            "leg2": "Leg 2",
-            "arm1": "Arm 1",
-            "arm2": "Arm 2",
+        skip_labels = {
+            0: "Skip Head  [G]",
+            1: "Skip Neck  [G]",
+            2: "Skip Torso mid  [G]",
+            3: "Skip Torso  [G]",
+            4: "Skip Leg 1  [G]",
+            6: "Skip Leg 2  [G]",
+            8: "Skip Arm 1  [G]",
+            10: "Skip Arm 2  [G]",
         }
-        if group in SKIP_MAP:
-            self.btn_skip_group.setText(f"Skip {group_names[group]}  [Tab]")
+        if self.stage in skip_labels:
+            self.btn_skip_group.setText(skip_labels[self.stage])
             self.btn_skip_group.setEnabled(True)
         else:
-            self.btn_skip_group.setText("Skip group  [Tab]")
+            self.btn_skip_group.setText("Skip group  [G]")
             self.btn_skip_group.setEnabled(False)
 
     # ------------------------------------------------------------------
@@ -543,9 +608,18 @@ class LabelerWindow(QMainWindow):
         self._refresh()
 
     def _skip_group(self):
-        group = self._stage_group()
-        if group in SKIP_MAP:
-            self.stage = SKIP_MAP[group]
+        skip_targets = {
+            0: 1,
+            1: 2,
+            2: 3,
+            3: 4,
+            4: 6,
+            6: 8,
+            8: 10,
+            10: 12,
+        }
+        if self.stage in skip_targets:
+            self.stage = skip_targets[self.stage]
             if self.stage >= len(STAGES):
                 self._save()
                 self._navigate(+1)
@@ -558,6 +632,16 @@ class LabelerWindow(QMainWindow):
 
     def _toggle_flip_y(self):
         self.flip_y = self.btn_flip_y.isChecked()
+        self._refresh()
+
+    def _shortcut_flip_x(self):
+        self.flip_x = not self.flip_x
+        self.btn_flip_x.setChecked(self.flip_x)
+        self._refresh()
+
+    def _shortcut_flip_y(self):
+        self.flip_y = not self.flip_y
+        self.btn_flip_y.setChecked(self.flip_y)
         self._refresh()
 
     def _navigate(self, delta, save=True):
@@ -576,35 +660,6 @@ class LabelerWindow(QMainWindow):
         with open(SAVE_PATH, "w") as f:
             json.dump(self.labels, f, indent=2)
         self._refresh()
-
-    # ------------------------------------------------------------------
-    # Keyboard shortcuts
-    # ------------------------------------------------------------------
-
-    def keyPressEvent(self, event):
-        k = event.key()
-        if k in (Qt.Key_Right, Qt.Key_Space):
-            self._navigate(+1)
-        elif k == Qt.Key_Left:
-            self._navigate(-1)
-        elif k in (Qt.Key_Delete, Qt.Key_Backspace):
-            self._clear_current()
-        elif k == Qt.Key_U:
-            self._undo_last()
-        elif k == Qt.Key_S:
-            self._save()
-        elif k == Qt.Key_Tab:
-            self._skip_group()
-        elif k == Qt.Key_X:
-            self.flip_x = not self.flip_x
-            self.btn_flip_x.setChecked(self.flip_x)
-            self._refresh()
-        elif k == Qt.Key_Y:
-            self.flip_y = not self.flip_y
-            self.btn_flip_y.setChecked(self.flip_y)
-            self._refresh()
-        else:
-            super().keyPressEvent(event)
 
     def closeEvent(self, event):
         self._save()

@@ -11,6 +11,7 @@ A PyQt5 desktop app for labeling anatomical keypoints on rasterised anthropomorp
 - rasterises each figure to a `448 x 448` mask
 - lets you annotate key anatomical points in a guided sequence
 - saves labels to `keypoint_labels.json`
+- resumes on the first figure whose `shape_id` is not already in the saved labels file
 
 ## Current defaults
 
@@ -24,8 +25,8 @@ The app looks for `full_annotations.geojson` next to the script or next to the b
 
 - `Left-click`: place current keypoint and advance
 - `Right-click`: remove nearest keypoint
-- `Tab`: skip current limb group
-- `Space` or `Right Arrow`: save and go to next figure
+- `G`: skip the current stage or limb section
+- `N` or `Right Arrow`: save and go to next figure
 - `Left Arrow`: save and go to previous figure
 - `U`: undo last placed or removed point
 - `Delete` or `Backspace`: clear current figure labels
@@ -45,9 +46,9 @@ The guided keypoint order is:
 6. leg 1 foot
 7. leg 2 knee
 8. leg 2 foot
-9. arm 1 shoulder
+9. arm 1 elbow
 10. arm 1 hand
-11. arm 2 shoulder
+11. arm 2 elbow
 12. arm 2 hand
 
 ## Requirements

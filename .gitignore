@@ -7,6 +7,7 @@ dist/
 *.egg-info/
 
 keypoint_labels.json
+*.geojson
 
 .venv/
 venv/
